@@ -166,6 +166,13 @@ pub trait OutputDev {
     fn area(&mut self, _area: &Area) -> Result<(), OutputError> {
         Ok(())
     }
+    /// Work done inside one operator, in units of about one array element or glyph: each
+    /// element of a `TJ` array, each code a string shows, and a Form's content before it is
+    /// parsed again (one unit per KiB). A device that keeps a deadline checks it here, since
+    /// one operator can take long; an error ends the walk.
+    fn work(&mut self, _units: u64) -> Result<(), OutputError> {
+        Ok(())
+    }
 }
 
 pub struct HTMLOutput<'a>  {

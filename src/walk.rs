@@ -23,6 +23,13 @@ const MAX_STATE_DEPTH: usize = 256;
 const MAX_INHERITANCE: usize = 64;
 /// Tolerance, in points, of the axis-aligned rectangle test.
 const RECT_TOLERANCE: f64 = 0.01;
+/// A rectangle that holds no point: the clip of a path with no extent or a malformed /BBox.
+const EMPTY_RECT: Rect = Rect {
+    x0: 0.0,
+    y0: 0.0,
+    x1: -1.0,
+    y1: -1.0,
+};
 /// The page size used when a page names no media box (US Letter).
 const DEFAULT_MEDIA_BOX: Rect = Rect {
     x0: 0.0,
@@ -661,6 +668,7 @@ impl<'a, 'o> Walker<'a, 'o> {
                 break;
             }
             at += len;
+            self.output.work(1)?;
             let (text, mapped) = font.decode(code);
             let width = font.width(code);
             let mut spacing = state.char_spacing;
@@ -966,6 +974,7 @@ impl<'a, 'o> Walker<'a, 'o> {
                 "TJ" => {
                     if let Some(Object::Array(items)) = operation.operands.last() {
                         for item in items {
+                            self.output.work(1)?;
                             match item {
                                 Object::String(bytes, _) => {
                                     self.show(&state, &mut tm, bytes, &mut text_clip)?
@@ -1057,15 +1066,7 @@ impl<'a, 'o> Walker<'a, 'o> {
                     }
                     // W and W* take effect after the painting operator (ISO 32000-1 §8.5.4).
                     if pending_clip.take().is_some() {
-                        state.clip = state.clip.and(
-                            bbox.unwrap_or(Rect {
-                                x0: 0.0,
-                                y0: 0.0,
-                                x1: -1.0,
-                                y1: -1.0,
-                            }),
-                            rect,
-                        );
+                        state.clip = state.clip.and(bbox.unwrap_or(EMPTY_RECT), rect);
                     }
                     path.ops.clear();
                     has_point = false;
@@ -1222,9 +1223,14 @@ impl<'a, 'o> Walker<'a, 'o> {
                 {
                     inner.ctm = inner.ctm.pre_transform(&m);
                 }
-                if let Some(bbox) = objects::get_numbers(doc, dict, b"BBox")
-                    .and_then(|values| Rect::from_array(&values))
-                {
+                // A /BBox that is not four numbers clips everything, as viewers skip such a
+                // Form; with no /BBox at all the Form draws unclipped.
+                let bbox = objects::get_numbers(doc, dict, b"BBox")
+                    .and_then(|values| Rect::from_array(&values));
+                if bbox.is_none() && dict.has(b"BBox") {
+                    inner.clip = inner.clip.and(EMPTY_RECT, true);
+                }
+                if let Some(bbox) = bbox {
                     let corners = [
                         (bbox.x0, bbox.y0),
                         (bbox.x1, bbox.y0),
@@ -1283,7 +1289,10 @@ impl<'a, 'o> Walker<'a, 'o> {
                     self.forms.push(id);
                 }
                 self.push_marked(optional, None);
-                let result = self.run(get_contents(stream), own_resources, inner, next);
+                let content = get_contents(stream);
+                // The Form's content is parsed again at every Do.
+                self.output.work(content.len() as u64 / 1024 + 1)?;
+                let result = self.run(content, own_resources, inner, next);
                 self.marked.pop();
                 if id.is_some() {
                     self.forms.pop();
